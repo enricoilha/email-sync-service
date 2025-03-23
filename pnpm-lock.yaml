@@ -47,7 +47,7 @@ devDependencies:
     specifier: ^9.18.0
     version: 9.23.0
   '@nestjs/cli':
-    specifier: ^11.0.0
+    specifier: ^11.0.5
     version: 11.0.5(@swc/cli@0.6.0)(@swc/core@1.11.11)(@types/node@22.13.11)
   '@nestjs/schematics':
     specifier: ^11.0.0
