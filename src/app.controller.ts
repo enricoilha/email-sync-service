@@ -74,6 +74,7 @@ async createEmailConnection(@Request() req, @Body() connectionData: any) {
     if (connection.provider === 'gmail') {
       await this.gmailWatchService.setupWatchNotification(connection.id, connection.access_token);
     } 
+    
     const syncResult = await this.fullSyncService.startFullSync(userId, connection.id, 1);
     
     return {
