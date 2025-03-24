@@ -13,13 +13,11 @@ export class AppController {
     return this.appService.getHello();
   }
 
-  // In your API endpoint that handles email connection creation
 @Post('email-connections')
 async createEmailConnection(@Request() req, @Body() connectionData: any) {
   try {
     const userId = req.user.id;
     
-    // Create the connection in database
     const { data: connection, error } = await this.supabaseService.getClient()
       .from('email_connections')
       .insert({
@@ -37,10 +35,8 @@ async createEmailConnection(@Request() req, @Body() connectionData: any) {
       
     if (error) throw error;
     
-    // Trigger a one-time initial full sync
     const syncResult = await this.fullSyncService.startFullSync(userId, connection.id, 1);
     
-    // If Gmail provider, set up push notifications
     if (connection.provider === 'gmail') {
       await this.gmailWatchService.setupWatchNotification(connection.id, connection.access_token);
     }

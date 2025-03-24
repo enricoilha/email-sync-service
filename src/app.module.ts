@@ -7,6 +7,10 @@ import { GmailModule } from './gmail/gmail.module';
 import { SyncModule } from './sync/sync.module';
 import { WebhookController } from './webhook.controller';
 import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { SupabaseService } from './supabase/supabase.service';
+import { FullSyncService } from './sync/full-sync.service';
+import { GmailWatchService } from './gmail/gmail-watch.service';
 
 @Module({
   imports: [
@@ -22,7 +26,8 @@ import { AppController } from './app.controller';
     SyncModule,
     
   ],
-  controllers: [AppController, WebhookController]
+  controllers: [AppController, WebhookController],
+  providers: [AppService, SupabaseService, FullSyncService, GmailWatchService]
   
 })
 export class AppModule {}
