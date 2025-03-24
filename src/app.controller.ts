@@ -23,7 +23,7 @@ async createEmailConnection(@Request() req, @Body() connectionData: any) {
     
     const { data: connection, error } = await this.supabaseService.getClient()
       .from('email_connections')
-      .insert({
+      .upsert({
         user_id: userId,
         provider: connectionData.provider,
         email: connectionData.email,
