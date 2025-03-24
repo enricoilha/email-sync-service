@@ -1,8 +1,9 @@
-import { Body, Controller, Get, HttpException, HttpStatus, Post, Request } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, HttpStatus, Post, Request, UseGuards } from '@nestjs/common';
 import { AppService } from './app.service';
 import { SupabaseService } from './supabase/supabase.service';
 import { FullSyncService } from './sync/full-sync.service';
 import { GmailWatchService } from './gmail/gmail-watch.service';
+import { AuthGuard } from './auth/auth.guard';
 
 @Controller()
 export class AppController {
@@ -13,7 +14,9 @@ export class AppController {
     return this.appService.getHello();
   }
 
+
 @Post('email-connections')
+@UseGuards(AuthGuard)
 async createEmailConnection(@Request() req, @Body() connectionData: any) {
   try {
     const userId = req.user.id;

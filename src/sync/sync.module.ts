@@ -7,12 +7,14 @@ import { SyncWorkerService } from './sync-worker.service';
 import { SyncController } from './sync.controller';
 import { SupabaseModule } from '../supabase/supabase.module';
 import { GmailModule } from '../gmail/gmail.module';
+import { GuardsModule } from 'src/auth/guards.module';
 
 @Module({
   imports: [
     ScheduleModule.forRoot(),
     SupabaseModule, 
-    GmailModule
+    GmailModule,
+    GuardsModule
   ],
   controllers: [SyncController],
   providers: [
@@ -26,6 +28,7 @@ import { GmailModule } from '../gmail/gmail.module';
     FullSyncService, 
     IncrementalSyncService,
     SyncWorkerService
+  
   ],
 })
 export class SyncModule {}
