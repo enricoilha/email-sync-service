@@ -12,7 +12,7 @@ interface EmailConnection {
   access_token: string;
   refresh_token: string;
   token_expires_at: string | undefined;
-  sync_status: "idle" | "syncing" | "error";
+  sync_status: "idle" | "syncing" | "error" | "requires_reauth";
   sync_batch_size?: number;
   total_folders?: number;
   latest_history_id?: string;
@@ -178,6 +178,13 @@ export class SyncService {
   async syncConnectionEmails(connection: EmailConnection, userId: string) {
     if (!connection || !connection.id) {
       throw new Error("Invalid connection object");
+    }
+
+    if (connection.sync_status === "requires_reauth") {
+      this.logger.log(
+        `Skipping connection ${connection.id} that needs reauthorization`,
+      );
+      return { success: false, error: "Connection needs reauthorization" };
     }
 
     try {

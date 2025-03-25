@@ -190,21 +190,39 @@ export class FullSyncService {
     this.logger.log(
       `Refreshing token for connection ${connection.id}`,
     );
+    let accessToken;
 
-    const tokens = await this.gmailService.refreshAccessToken(
-      connection.refresh_token,
-    );
+    try {
+      const tokens = await this.gmailService.refreshAccessToken(
+        connection.refresh_token,
+      );
 
-    // Update the token in the database
-    await this.supabaseService.updateEmailConnection(connection.id, {
-      access_token: tokens.accessToken,
-      refresh_token: tokens.refreshToken || connection.refresh_token,
-      token_expires_at: tokens.expiryDate
-        ? new Date(tokens.expiryDate).toISOString()
-        : null,
-    });
+      // Update the token in the database
+      await this.supabaseService.updateEmailConnection(connection.id, {
+        access_token: tokens.accessToken,
+        refresh_token: tokens.refreshToken || connection.refresh_token,
+        token_expires_at: tokens.expiryDate
+          ? new Date(tokens.expiryDate).toISOString()
+          : null,
+      });
+      accessToken = tokens.accessToken;
+    } catch (error) {
+      if (error.message.includes("Token has been revoked")) {
+        await this.supabaseService.updateEmailConnection(connectionId, {
+          sync_status: "requires_reauth",
+          sync_error: "Authentication expired. Please reconnect your account.",
+          is_connected: false,
+        });
 
-    const accessToken = tokens.accessToken;
+        // Also update the sync operation status
+        await this.updateSyncStatus(syncId, {
+          status: "failed",
+          status_message:
+            "Authentication expired. Please reconnect your account.",
+          completed_at: new Date().toISOString(),
+        });
+      }
+    }
 
     // Get folder list based on email provider
     let folderList;
