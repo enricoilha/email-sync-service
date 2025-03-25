@@ -17,6 +17,7 @@ interface EmailConnection {
   total_folders?: number;
   latest_history_id?: string;
   sync_error?: string | null;
+  sync_in_progress?: boolean;
 }
 
 interface SyncResponse {
@@ -104,9 +105,36 @@ export class SyncService {
   // Run sync every 5 minutes for all users
   @Cron(CronExpression.EVERY_5_MINUTES)
   async handleCronSync() {
-    this.logger.log("Running scheduled email sync for all users");
+    // Acquire a distributed lock to prevent multiple instances from running sync at same time
+    const lockId = `sync-lock-${new Date().toISOString().slice(0, 16)}`; // Lock per 5-minute window
 
     try {
+      // Try to get a distributed lock
+      try {
+        const { data: lock, error: lockError } = await this.supabaseService
+          .getClient()
+          .from("sync_locks")
+          .insert({
+            id: lockId,
+            acquired_at: new Date().toISOString(),
+            expires_at: new Date(Date.now() + 4 * 60 * 1000).toISOString(), // 4 minutes
+          })
+          .select();
+
+        if (lockError) {
+          // If we get a uniqueness constraint error, another instance already acquired the lock
+          this.logger.log("Another instance is already running sync, skipping");
+          return;
+        }
+      } catch (lockError) {
+        // If the table doesn't exist or there's another error, log it but continue
+        this.logger.error(
+          `Lock error (continuing anyway): ${lockError.message}`,
+        );
+      }
+
+      this.logger.log("Running scheduled email sync for all users");
+
       // Get all users with email connections
       const { data: users, error } = await this.supabaseService
         .getClient()
@@ -130,6 +158,16 @@ export class SyncService {
       this.logger.log(`Completed sync for ${users.length} users`);
     } catch (error) {
       this.logger.error(`Error in scheduled sync: ${error.message}`);
+    } finally {
+      // Release the lock
+      try {
+        await this.supabaseService.getClient()
+          .from("sync_locks")
+          .delete()
+          .eq("id", lockId);
+      } catch (error) {
+        this.logger.error(`Error releasing sync lock: ${error.message}`);
+      }
     }
   }
 
@@ -160,31 +198,59 @@ export class SyncService {
             continue;
           }
 
-          await this.syncConnectionEmails(connection, userId);
-          successCount++;
+          // Try to acquire a lock on this connection for syncing
+          const { data: lockResult, error: lockError } = await this
+            .supabaseService.getClient()
+            .from("email_connections")
+            .update({ sync_in_progress: true })
+            .eq("id", connection.id)
+            .eq("sync_in_progress", false) // Only update if not already in progress
+            .select();
+
+          if (lockError || !lockResult || lockResult.length === 0) {
+            this.logger.log(
+              `Skipping connection ${connection.id} as it's already being processed`,
+            );
+            continue;
+          }
+
+          try {
+            await this.syncConnectionEmails(connection, userId);
+            successCount++;
+          } catch (error) {
+            this.logger.error(
+              `Error syncing connection ${connection.id}: ${error.message}`,
+            );
+
+            // Check if this is a token revocation error
+            if (
+              error.code === "TOKEN_REVOKED" ||
+              (error.message &&
+                error.message.includes("Token has been revoked"))
+            ) {
+              // Mark the connection as needing reauthorization
+              await this.supabaseService.updateEmailConnection(connection.id, {
+                sync_status: "requires_reauth",
+                sync_error: error.message ||
+                  "Authentication expired. Please reconnect your account.",
+                last_sync_error_at: new Date().toISOString(),
+              });
+
+              this.logger.log(
+                `Marked connection ${connection.id} as requiring reauthorization`,
+              );
+            }
+          } finally {
+            // Always release the lock when done, regardless of success or failure
+            await this.supabaseService.getClient()
+              .from("email_connections")
+              .update({ sync_in_progress: false })
+              .eq("id", connection.id);
+          }
         } catch (error) {
           this.logger.error(
             `Error syncing connection ${connection.id}: ${error.message}`,
           );
-
-          // Check if this is a token revocation error
-          if (
-            error.code === "TOKEN_REVOKED" ||
-            (error.message && error.message.includes("Token has been revoked"))
-          ) {
-            // Mark the connection as needing reauthorization
-            await this.supabaseService.updateEmailConnection(connection.id, {
-              sync_status: "requires_reauth",
-              sync_error: error.message ||
-                "Authentication expired. Please reconnect your account.",
-              last_sync_error_at: new Date().toISOString(),
-            });
-
-            this.logger.log(
-              `Marked connection ${connection.id} as requiring reauthorization`,
-            );
-          }
-
           // Continue with next connection
         }
       }
@@ -205,13 +271,6 @@ export class SyncService {
   async syncConnectionEmails(connection: EmailConnection, userId: string) {
     if (!connection || !connection.id) {
       throw new Error("Invalid connection object");
-    }
-
-    if (connection.sync_status === "requires_reauth") {
-      this.logger.log(
-        `Skipping connection ${connection.id} that needs reauthorization`,
-      );
-      return { success: false, error: "Connection needs reauthorization" };
     }
 
     try {
@@ -389,6 +448,16 @@ export class SyncService {
       const connection = connections[0] as EmailConnection;
       this.logger.log(`Found connection for ${connection.email}`);
 
+      // Check if connection needs reauthorization
+      if (connection.sync_status === "requires_reauth") {
+        return {
+          success: false,
+          requiresReauth: true,
+          message:
+            "This connection needs to be reauthorized. Please reconnect your account.",
+        };
+      }
+
       // Check if token is expired and refresh if needed
       const now = new Date();
       const tokenExpiry = connection.token_expires_at
@@ -397,20 +466,46 @@ export class SyncService {
       let accessToken = connection.access_token;
 
       if (tokenExpiry <= now) {
-        this.logger.log("Token is expired, refreshing...");
-        const tokens = await this.gmailService.refreshAccessToken(
-          connection.refresh_token,
-        );
+        try {
+          this.logger.log("Token is expired, refreshing...");
+          const tokens = await this.gmailService.refreshAccessToken(
+            connection.refresh_token,
+          );
 
-        await this.supabaseService.updateEmailConnection(connection.id, {
-          access_token: tokens.accessToken,
-          refresh_token: tokens.refreshToken || connection.refresh_token,
-          token_expires_at: tokens.expiryDate
-            ? new Date(tokens.expiryDate).toISOString()
-            : undefined,
-        });
+          await this.supabaseService.updateEmailConnection(connection.id, {
+            access_token: tokens.accessToken,
+            refresh_token: tokens.refreshToken || connection.refresh_token,
+            token_expires_at: tokens.expiryDate
+              ? new Date(tokens.expiryDate).toISOString()
+              : undefined,
+          });
 
-        accessToken = tokens.accessToken;
+          accessToken = tokens.accessToken;
+        } catch (refreshError) {
+          // Check if this is a token revocation
+          if (
+            refreshError.code === "TOKEN_REVOKED" ||
+            (refreshError.message &&
+              refreshError.message.includes("Token has been revoked"))
+          ) {
+            // Mark the connection as needing reauthorization
+            await this.supabaseService.updateEmailConnection(connection.id, {
+              sync_status: "requires_reauth",
+              sync_error: refreshError.message ||
+                "Authentication expired. Please reconnect your account.",
+              last_sync_error_at: new Date().toISOString(),
+            });
+
+            return {
+              success: false,
+              requiresReauth: true,
+              message:
+                "Authentication token has been revoked. Please reconnect your account.",
+            };
+          }
+
+          throw refreshError;
+        }
       }
 
       // Get folder ID from database

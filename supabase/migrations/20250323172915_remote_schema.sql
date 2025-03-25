@@ -816,3 +816,16 @@ ADD COLUMN watch_expiration TIMESTAMP WITH TIME ZONE;
 ALTER TABLE email_connections ADD COLUMN IF NOT EXISTS sync_status VARCHAR(50) DEFAULT 'idle';
 ALTER TABLE email_connections ADD COLUMN IF NOT EXISTS sync_error TEXT;
 ALTER TABLE email_connections ADD COLUMN IF NOT EXISTS last_sync_error_at TIMESTAMP;
+
+-- Add necessary columns to email_connections table
+ALTER TABLE email_connections ADD COLUMN IF NOT EXISTS sync_status VARCHAR(50) DEFAULT 'idle';
+ALTER TABLE email_connections ADD COLUMN IF NOT EXISTS sync_error TEXT;
+ALTER TABLE email_connections ADD COLUMN IF NOT EXISTS last_sync_error_at TIMESTAMP;
+ALTER TABLE email_connections ADD COLUMN IF NOT EXISTS sync_in_progress BOOLEAN DEFAULT false;
+
+-- Create sync_locks table for distributed locking
+CREATE TABLE IF NOT EXISTS sync_locks (
+  id TEXT PRIMARY KEY,
+  acquired_at TIMESTAMP NOT NULL,
+  expires_at TIMESTAMP NOT NULL
+);

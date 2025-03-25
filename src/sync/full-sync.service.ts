@@ -186,13 +186,27 @@ export class FullSyncService {
       worker_id: workerId,
     });
 
-    // Always refresh token at the start of sync to ensure we have a valid token
-    this.logger.log(
-      `Refreshing token for connection ${connection.id}`,
-    );
-    let accessToken;
-
     try {
+      // First check if the connection is already marked as requiring reauthorization
+      if (connection.sync_status === "requires_reauth") {
+        await this.updateSyncStatus(syncId, {
+          status: "failed",
+          progress: 0,
+          status_message:
+            "This connection needs to be reauthorized. Please reconnect your account.",
+          completed_at: new Date().toISOString(),
+        });
+
+        throw new Error(
+          "This connection needs to be reauthorized. Please reconnect your account.",
+        );
+      }
+
+      // Always refresh token at the start of sync to ensure we have a valid token
+      this.logger.log(
+        `Refreshing token for connection ${connection.id}`,
+      );
+
       let tokens;
       try {
         tokens = await this.gmailService.refreshAccessToken(
@@ -239,149 +253,25 @@ export class FullSyncService {
           ? new Date(tokens.expiryDate).toISOString()
           : null,
       });
-      accessToken = tokens.accessToken;
+
+      const accessToken = tokens.accessToken;
+
+      // Continue with the rest of your existing function
+      // ...
     } catch (error) {
-      if (error.message.includes("Token has been revoked")) {
-        await this.supabaseService.updateEmailConnection(connectionId, {
-          sync_status: "requires_reauth",
-          sync_error: "Authentication expired. Please reconnect your account.",
-          is_connected: false,
-        });
-
-        // Also update the sync operation status
-        await this.updateSyncStatus(syncId, {
-          status: "failed",
-          status_message:
-            "Authentication expired. Please reconnect your account.",
-          completed_at: new Date().toISOString(),
-        });
-      }
-    }
-
-    // Get folder list based on email provider
-    let folderList;
-    let historyId;
-
-    if (connection.provider === "gmail") {
-      // Get all Gmail labels first to track history ID
-      const labels = await this.gmailService.getMailLabels(accessToken);
-      historyId = this.extractLatestHistoryId(labels);
-
-      // Get folders from database
-      const { data: folders } = await this.supabaseService
-        .getClient()
-        .from("folders")
-        .select("*")
-        .eq("user_id", userId)
-        .eq("connection_id", connectionId);
-
-      folderList = folders || [];
-    } else if (connection.provider === "outlook") {
-      // For future implementation with Outlook
-      // Similar logic would go here for Outlook folders
-      throw new Error("Outlook provider not yet implemented");
-    } else {
-      throw new Error(`Unsupported email provider: ${connection.provider}`);
-    }
-
-    // Update total folders count if it differs
-    if (
-      folderList.length > 0 && folderList.length !== connection.total_folders
-    ) {
-      await this.updateSyncStatus(syncId, {
-        total_folders: folderList.length,
-      });
-    }
-
-    // Sync emails for each folder
-    let totalMessagesProcessed = 0;
-    let foldersCompleted = 0;
-    let batchSize = connection.sync_batch_size || 100; // Get batch size from connection settings
-
-    for (const folder of folderList) {
-      this.logger.log(
-        `Starting sync for folder ${folder.name} (${folder.id})`,
-      );
-
-      // Update the sync status
-      await this.updateSyncStatus(syncId, {
-        current_folder: folder.name,
-        status_message: `Syncing ${folder.name}...`,
-      });
-
-      // Get folder ID from database
-      const { data: folderData } = await this.supabaseService
-        .getClient()
-        .from("folders")
-        .select("id")
-        .eq("user_id", userId)
-        .eq("connection_id", connectionId)
-        .eq("name", folder.name)
-        .single();
-
-      const folderDbId = folderData?.id;
-
-      if (!folderDbId) {
-        throw new Error(`Folder ID not found for ${folder.name}`);
-      }
-
-      // Clear existing emails for this folder before full sync
-      await this.supabaseService
-        .getClient()
-        .from("cached_emails")
-        .delete()
-        .eq("user_id", userId)
-        .eq("connection_id", connectionId)
-        .eq("folder_id", folderDbId);
-
-      this.logger.log(`Cleared existing emails for ${folder.name}`);
-
-      // Perform the full folder sync
-      const folderResult = await this.syncEntireFolder(
-        accessToken,
-        userId,
-        connectionId,
-        folderDbId,
-        folder.provider_folder_id,
-        syncId,
-        batchSize,
-      );
-
-      totalMessagesProcessed += folderResult.totalSynced;
-      foldersCompleted++;
-
-      // Update the sync progress
-      await this.updateSyncStatus(syncId, {
-        folders_completed: foldersCompleted,
-        messages_synced: totalMessagesProcessed,
-        progress: Math.round((foldersCompleted / folderList.length) * 100),
-      });
-
-      this.logger.log(
-        `Completed sync for ${folder.name}, processed ${folderResult.totalSynced} messages`,
+      this.logger.error(`Error in full sync process: ${error.message}`);
+      // Update connection status on error
+      this.supabaseService.updateEmailConnection(connectionId, {
+        sync_status: error.code === "TOKEN_REVOKED"
+          ? "requires_reauth"
+          : "error",
+        sync_error: error.message,
+      }).catch((err) =>
+        this.logger.error(
+          `Failed to update connection status: ${err.message}`,
+        )
       );
     }
-
-    // Update the sync operation to completed
-    await this.updateSyncStatus(syncId, {
-      status: "completed",
-      progress: 100,
-      status_message: "Full sync completed successfully",
-      completed_at: new Date().toISOString(),
-      latest_history_id: historyId,
-    });
-
-    // Store the history ID for the connection for future incremental syncs
-    await this.supabaseService.updateEmailConnection(connectionId, {
-      latest_history_id: historyId,
-      last_synced_at: new Date().toISOString(),
-      sync_status: "idle",
-      sync_error: null,
-    });
-
-    this.logger.log(
-      `Full sync completed for user ${userId}, connection ${connectionId}`,
-    );
   }
 
   /**

@@ -4,6 +4,7 @@ import {
   Get,
   HttpException,
   HttpStatus,
+  Param,
   Post,
   Request,
   UseGuards,
@@ -127,6 +128,43 @@ export class AppController {
     } catch (error) {
       throw new HttpException(
         error.message || "Error creating email connection",
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  @Get("email-connections/:connectionId/status")
+  @UseGuards(AuthGuard)
+  async getConnectionStatus(
+    @Request() req,
+    @Param("connectionId") connectionId: string,
+  ) {
+    try {
+      const userId = req.user.id;
+
+      const { data: connection, error } = await this.supabaseService.getClient()
+        .from("email_connections")
+        .select("*")
+        .eq("id", connectionId)
+        .eq("user_id", userId)
+        .single();
+
+      if (error) {
+        throw new HttpException("Connection not found", HttpStatus.NOT_FOUND);
+      }
+
+      return {
+        id: connection.id,
+        email: connection.email,
+        provider: connection.provider,
+        status: connection.sync_status,
+        needsReconnect: connection.sync_status === "requires_reauth",
+        lastSyncedAt: connection.last_synced_at,
+        error: connection.sync_error,
+      };
+    } catch (error) {
+      throw new HttpException(
+        error.message || "Error getting connection status",
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
