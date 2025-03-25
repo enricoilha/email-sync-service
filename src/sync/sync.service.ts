@@ -152,12 +152,39 @@ export class SyncService {
       let successCount = 0;
       for (const connection of connections) {
         try {
+          // Skip connections that are already marked for reauthorization
+          if (connection.sync_status === "requires_reauth") {
+            this.logger.log(
+              `Skipping connection ${connection.id} that requires reauthorization`,
+            );
+            continue;
+          }
+
           await this.syncConnectionEmails(connection, userId);
           successCount++;
         } catch (error) {
           this.logger.error(
             `Error syncing connection ${connection.id}: ${error.message}`,
           );
+
+          // Check if this is a token revocation error
+          if (
+            error.code === "TOKEN_REVOKED" ||
+            (error.message && error.message.includes("Token has been revoked"))
+          ) {
+            // Mark the connection as needing reauthorization
+            await this.supabaseService.updateEmailConnection(connection.id, {
+              sync_status: "requires_reauth",
+              sync_error: error.message ||
+                "Authentication expired. Please reconnect your account.",
+              last_sync_error_at: new Date().toISOString(),
+            });
+
+            this.logger.log(
+              `Marked connection ${connection.id} as requiring reauthorization`,
+            );
+          }
+
           // Continue with next connection
         }
       }
@@ -216,6 +243,26 @@ export class SyncService {
           accessToken = tokens.accessToken;
           this.logger.log("Token refreshed successfully");
         } catch (refreshError) {
+          // Check if this is a token revocation
+          if (
+            refreshError.code === "TOKEN_REVOKED" ||
+            (refreshError.message &&
+              refreshError.message.includes("Token has been revoked"))
+          ) {
+            // Mark the connection as needing reauthorization
+            await this.supabaseService.updateEmailConnection(connection.id, {
+              sync_status: "requires_reauth",
+              sync_error: refreshError.message ||
+                "Authentication expired. Please reconnect your account.",
+              last_sync_error_at: new Date().toISOString(),
+            });
+
+            this.logger.error(
+              `Token revocation detected for ${connection.email}. Connection marked for reauthorization.`,
+            );
+            throw refreshError; // Re-throw to stop the sync process for this connection
+          }
+
           this.logger.error(`Error refreshing token: ${refreshError.message}`);
           throw refreshError;
         }

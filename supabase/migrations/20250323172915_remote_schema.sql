@@ -811,3 +811,8 @@ ALTER TABLE email_connections
 ADD COLUMN watch_resource_id TEXT,
 ADD COLUMN watch_history_id TEXT,
 ADD COLUMN watch_expiration TIMESTAMP WITH TIME ZONE;
+
+-- If you need to add these columns to your table:
+ALTER TABLE email_connections ADD COLUMN IF NOT EXISTS sync_status VARCHAR(50) DEFAULT 'idle';
+ALTER TABLE email_connections ADD COLUMN IF NOT EXISTS sync_error TEXT;
+ALTER TABLE email_connections ADD COLUMN IF NOT EXISTS last_sync_error_at TIMESTAMP;

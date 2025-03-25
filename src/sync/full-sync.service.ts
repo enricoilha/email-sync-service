@@ -193,9 +193,43 @@ export class FullSyncService {
     let accessToken;
 
     try {
-      const tokens = await this.gmailService.refreshAccessToken(
-        connection.refresh_token,
-      );
+      let tokens;
+      try {
+        tokens = await this.gmailService.refreshAccessToken(
+          connection.refresh_token,
+        );
+      } catch (refreshError) {
+        // Check if this is a token revocation
+        if (
+          refreshError.code === "TOKEN_REVOKED" ||
+          (refreshError.message &&
+            refreshError.message.includes("Token has been revoked"))
+        ) {
+          // Mark the connection as needing reauthorization
+          await this.supabaseService.updateEmailConnection(connectionId, {
+            sync_status: "requires_reauth",
+            sync_error: refreshError.message ||
+              "Authentication expired. Please reconnect your account.",
+            last_sync_error_at: new Date().toISOString(),
+          });
+
+          // Update the sync operation to failed
+          await this.updateSyncStatus(syncId, {
+            status: "failed",
+            progress: 0,
+            status_message:
+              "Authentication error: Token has been revoked. User needs to reconnect account.",
+            completed_at: new Date().toISOString(),
+          });
+
+          this.logger.error(
+            `Token revocation detected for ${connection.email}. Connection marked for reauthorization.`,
+          );
+          throw refreshError; // Re-throw to stop the sync process
+        }
+
+        throw refreshError; // Re-throw other errors
+      }
 
       // Update the token in the database
       await this.supabaseService.updateEmailConnection(connection.id, {

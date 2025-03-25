@@ -98,9 +98,11 @@ export class GmailService {
         // You could call a method to mark this connection as needing reauthorization
         // await this.markConnectionForReauthorization(connectionId);
 
-        throw new Error(
-          "Token has been revoked. User needs to reconnect their account.",
-        );
+        throw {
+          code: "TOKEN_REVOKED",
+          message:
+            "Token has been revoked. User needs to reconnect their account.",
+        };
       }
 
       this.logger.error(`Error refreshing token: ${error.message}`);
