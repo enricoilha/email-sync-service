@@ -203,9 +203,7 @@ export class FullSyncService {
       }
 
       // Always refresh token at the start of sync to ensure we have a valid token
-      this.logger.log(
-        `Refreshing token for connection ${connection.id}`,
-      );
+      this.logger.log(`Refreshing token for connection ${connection.id}`);
 
       let tokens;
       try {
@@ -256,20 +254,148 @@ export class FullSyncService {
 
       const accessToken = tokens.accessToken;
 
-      // Continue with the rest of your existing function
-      // ...
+      // Get folder list based on email provider
+      let folderList;
+      let historyId;
+
+      if (connection.provider === "gmail") {
+        // Get all Gmail labels first to track history ID
+        const labels = await this.gmailService.getMailLabels(accessToken);
+        historyId = this.extractLatestHistoryId(labels);
+
+        // Get folders from database
+        const { data: folders } = await this.supabaseService
+          .getClient()
+          .from("folders")
+          .select("*")
+          .eq("user_id", userId)
+          .eq("connection_id", connectionId);
+
+        folderList = folders || [];
+      } else if (connection.provider === "outlook") {
+        // For future implementation with Outlook
+        // Similar logic would go here for Outlook folders
+        throw new Error("Outlook provider not yet implemented");
+      } else {
+        throw new Error(`Unsupported email provider: ${connection.provider}`);
+      }
+
+      // Update total folders count if it differs
+      if (
+        folderList.length > 0 && folderList.length !== connection.total_folders
+      ) {
+        await this.updateSyncStatus(syncId, {
+          total_folders: folderList.length,
+        });
+      }
+
+      // Sync emails for each folder
+      let totalMessagesProcessed = 0;
+      let foldersCompleted = 0;
+      let batchSize = connection.sync_batch_size || 100; // Get batch size from connection settings
+
+      for (const folder of folderList) {
+        this.logger.log(
+          `Starting sync for folder ${folder.name} (${folder.id})`,
+        );
+
+        // Update the sync status
+        await this.updateSyncStatus(syncId, {
+          current_folder: folder.name,
+          status_message: `Syncing ${folder.name}...`,
+        });
+
+        // Get folder ID from database
+        const { data: folderData } = await this.supabaseService
+          .getClient()
+          .from("folders")
+          .select("id")
+          .eq("user_id", userId)
+          .eq("connection_id", connectionId)
+          .eq("name", folder.name)
+          .single();
+
+        const folderDbId = folderData?.id;
+
+        if (!folderDbId) {
+          throw new Error(`Folder ID not found for ${folder.name}`);
+        }
+
+        // Clear existing emails for this folder before full sync
+        await this.supabaseService
+          .getClient()
+          .from("cached_emails")
+          .delete()
+          .eq("user_id", userId)
+          .eq("connection_id", connectionId)
+          .eq("folder_id", folderDbId);
+
+        this.logger.log(`Cleared existing emails for ${folder.name}`);
+
+        // Perform the full folder sync
+        const folderResult = await this.syncEntireFolder(
+          accessToken,
+          userId,
+          connectionId,
+          folderDbId,
+          folder.provider_folder_id,
+          syncId,
+          batchSize,
+        );
+
+        totalMessagesProcessed += folderResult.totalSynced;
+        foldersCompleted++;
+
+        // Update the sync progress
+        await this.updateSyncStatus(syncId, {
+          folders_completed: foldersCompleted,
+          messages_synced: totalMessagesProcessed,
+          progress: Math.round((foldersCompleted / folderList.length) * 100),
+        });
+
+        this.logger.log(
+          `Completed sync for ${folder.name}, processed ${folderResult.totalSynced} messages`,
+        );
+      }
+
+      // Update the sync operation to completed
+      await this.updateSyncStatus(syncId, {
+        status: "completed",
+        progress: 100,
+        status_message: "Full sync completed successfully",
+        completed_at: new Date().toISOString(),
+        latest_history_id: historyId,
+      });
+
+      // Store the history ID for the connection for future incremental syncs
+      await this.supabaseService.updateEmailConnection(connectionId, {
+        latest_history_id: historyId,
+        last_synced_at: new Date().toISOString(),
+        sync_status: "idle",
+        sync_error: null,
+      });
+
+      this.logger.log(
+        `Full sync completed for user ${userId}, connection ${connectionId}`,
+      );
     } catch (error) {
       this.logger.error(`Error in full sync process: ${error.message}`);
+
+      // Update the sync operation to failed
+      await this.updateSyncStatus(syncId, {
+        status: "failed",
+        status_message: `Error: ${error.message}`,
+        completed_at: new Date().toISOString(),
+      });
+
       // Update connection status on error
-      this.supabaseService.updateEmailConnection(connectionId, {
+      await this.supabaseService.updateEmailConnection(connectionId, {
         sync_status: error.code === "TOKEN_REVOKED"
           ? "requires_reauth"
           : "error",
         sync_error: error.message,
       }).catch((err) =>
-        this.logger.error(
-          `Failed to update connection status: ${err.message}`,
-        )
+        this.logger.error(`Failed to update connection status: ${err.message}`)
       );
     }
   }
@@ -303,96 +429,113 @@ export class FullSyncService {
         status_message: `Syncing page ${pageCount}...`,
       });
 
-      // Check if token needs refresh before making the API call
-      const connection = await this.getConnectionDetails(connectionId);
+      try {
+        // Check if token needs refresh before making the API call
+        const connection = await this.getConnectionDetails(connectionId);
 
-      // If token is expired, refresh it
-      let currentAccessToken = accessToken;
-      const now = new Date();
-      const tokenExpiry = connection.token_expires_at
-        ? new Date(connection.token_expires_at)
-        : new Date(0);
+        // If token is expired, refresh it
+        let currentAccessToken = accessToken;
+        const now = new Date();
+        const tokenExpiry = connection.token_expires_at
+          ? new Date(connection.token_expires_at)
+          : new Date(0);
 
-      if (tokenExpiry <= now) {
-        this.logger.log(
-          `Token expired, refreshing token for connection ${connectionId}`,
-        );
-        const tokens = await this.gmailService.refreshAccessToken(
-          connection.refresh_token,
-        );
+        if (tokenExpiry <= now) {
+          this.logger.log(
+            `Token expired, refreshing token for connection ${connectionId}`,
+          );
+          const tokens = await this.gmailService.refreshAccessToken(
+            connection.refresh_token,
+          );
 
-        // Update token in database
-        await this.supabaseService.updateEmailConnection(connectionId, {
-          access_token: tokens.accessToken,
-          refresh_token: tokens.refreshToken || connection.refresh_token,
-          token_expires_at: tokens.expiryDate
-            ? new Date(tokens.expiryDate).toISOString()
-            : undefined,
+          // Update token in database
+          await this.supabaseService.updateEmailConnection(connectionId, {
+            access_token: tokens.accessToken,
+            refresh_token: tokens.refreshToken || connection.refresh_token,
+            token_expires_at: tokens.expiryDate
+              ? new Date(tokens.expiryDate).toISOString()
+              : undefined,
+          });
+
+          // Use new token for this API call
+          currentAccessToken = tokens.accessToken;
+          this.logger.log(
+            `Successfully refreshed token for connection ${connectionId}`,
+          );
+        }
+
+        // Use the current (potentially refreshed) token for the API call
+        const response = await this.executeWithBackoff(async () => {
+          return await this.gmailService.getEmails(
+            currentAccessToken,
+            providerFolderId,
+            {
+              maxResults: maxResultsPerPage,
+              pageToken: pageToken,
+            },
+          );
         });
 
-        // Use new token for this API call
-        currentAccessToken = tokens.accessToken;
+        if (!response.messages || response.messages.length === 0) {
+          // No more messages to process
+          this.logger.log(`No more messages in folder ${folderDbId}`);
+          break;
+        }
+
+        // Prepare emails for caching with proper folder_id
+        const emailsToCache = response.messages.map((message) => ({
+          ...message,
+          folder_id: folderDbId,
+        }));
+
+        // Cache the messages in batches to avoid transaction limits
+        const cacheResult = await this.cacheBatchedEmails(
+          emailsToCache,
+          userId,
+          connectionId,
+          folderDbId,
+          maxResultsPerPage,
+        );
+
+        // Update counts
+        totalSynced += cacheResult.count;
+
+        // Update sync status with progress
+        await this.updateSyncStatus(syncId, {
+          messages_synced: totalSynced,
+          status_message: `Synced ${totalSynced} messages...`,
+        });
+
+        // Check if there are more pages
+        pageToken = response.nextPageToken || undefined;
+        hasMorePages = !!pageToken;
+
         this.logger.log(
-          `Successfully refreshed token for connection ${connectionId}`,
+          `Processed page ${pageCount} with ${response.messages.length} messages for folder ${folderDbId}`,
         );
-      }
 
-      // Use the current (potentially refreshed) token for the API call
-      const response = await this.executeWithBackoff(async () => {
-        return await this.gmailService.getEmails(
-          currentAccessToken,
-          providerFolderId,
-          {
-            maxResults: maxResultsPerPage,
-            pageToken: pageToken,
-          },
+        // Reset retry count after successful fetch
+        retryCount = 0;
+
+        // Add a small delay to avoid rate limits
+        if (hasMorePages) {
+          await this.delay(500);
+        }
+      } catch (error) {
+        this.logger.error(
+          `Error processing page ${pageCount} for folder ${folderDbId}: ${error.message}`,
         );
-      });
+        retryCount++;
 
-      if (!response.messages || response.messages.length === 0) {
-        // No more messages to process
-        this.logger.log(`No more messages in folder ${folderDbId}`);
-        break;
-      }
+        if (retryCount >= maxRetries) {
+          this.logger.error(
+            `Max retries (${maxRetries}) exceeded for folder ${folderDbId}`,
+          );
+          break;
+        }
 
-      // Prepare emails for caching with proper folder_id
-      const emailsToCache = response.messages.map((message) => ({
-        ...message,
-        folder_id: folderDbId,
-      }));
-
-      // Cache the messages in batches to avoid transaction limits
-      const cacheResult = await this.cacheBatchedEmails(
-        emailsToCache,
-        userId,
-        connectionId,
-        folderDbId,
-        maxResultsPerPage,
-      );
-
-      // Update counts
-      totalSynced += cacheResult.count;
-
-      // Update sync status with progress
-      await this.updateSyncStatus(syncId, {
-        messages_synced: totalSynced,
-        status_message: `Synced ${totalSynced} messages...`,
-      });
-
-      // Check if there are more pages
-      pageToken = response.nextPageToken || undefined;
-      hasMorePages = !!pageToken;
-
-      this.logger.log(
-        `Processed page ${pageCount} with ${response.messages.length} messages for folder ${folderDbId}`,
-      );
-
-      // Reset retry count after successful fetch
-      retryCount = 0;
-
-      // Add a small delay to avoid rate limits
-      if (hasMorePages) {
-        await this.delay(500);
+        // Wait before retrying
+        await this.delay(1000 * retryCount);
       }
     }
 
@@ -433,18 +576,30 @@ export class FullSyncService {
     for (let i = 0; i < emails.length; i += batchSize) {
       const batch = emails.slice(i, Math.min(i + batchSize, emails.length));
 
-      const result = await this.supabaseService.cacheEmails(
-        batch,
-        userId,
-        connectionId,
-        folderDbId,
-      );
+      try {
+        const result = await this.supabaseService.cacheEmails(
+          batch,
+          userId,
+          connectionId,
+          folderDbId,
+        );
 
-      totalCached += result.count;
+        totalCached += result.count;
 
-      // Small delay between batches
-      if (i + batchSize < emails.length) {
-        await this.delay(100);
+        // Log progress
+        this.logger.log(
+          `Cached batch ${Math.floor(i / batchSize) + 1} of ${
+            Math.ceil(emails.length / batchSize)
+          } (${totalCached}/${emails.length} emails)`,
+        );
+
+        // Small delay between batches
+        if (i + batchSize < emails.length) {
+          await this.delay(100);
+        }
+      } catch (error) {
+        this.logger.error(`Error caching batch of emails: ${error.message}`);
+        // Continue with next batch instead of failing completely
       }
     }
 
@@ -458,12 +613,36 @@ export class FullSyncService {
     fn: () => Promise<T>,
     maxRetries: number = 5,
   ): Promise<T> {
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const result = await fn();
-      return result;
+    let retryCount = 0;
+    let lastError: any;
+
+    while (retryCount <= maxRetries) {
+      try {
+        const result = await fn();
+        return result;
+      } catch (error) {
+        lastError = error;
+
+        // Check if this is a rate limit error
+        if (
+          error.message.includes("Rate Limit Exceeded") ||
+          error.code === 429 ||
+          (error.response && error.response.status === 429)
+        ) {
+          retryCount++;
+          const delayMs = Math.pow(2, retryCount) * 1000 + Math.random() * 1000;
+          this.logger.log(
+            `Rate limited, retrying in ${delayMs}ms (retry ${retryCount} of ${maxRetries})`,
+          );
+          await this.delay(delayMs);
+        } else {
+          // Not a rate limit error, just throw it
+          throw error;
+        }
+      }
     }
 
-    throw new Error("Maximum retries exceeded");
+    throw lastError || new Error("Maximum retries exceeded");
   }
 
   /**

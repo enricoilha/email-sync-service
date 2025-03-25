@@ -1,6 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import configuration from 'src/config/configuration';
+import { Injectable, Logger } from "@nestjs/common";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import configuration from "src/config/configuration";
 
 @Injectable()
 export class SupabaseService {
@@ -21,9 +21,9 @@ export class SupabaseService {
 
   async getEmailConnections(userId: string) {
     const { data, error } = await this.supabase
-      .from('email_connections')
-      .select('*')
-      .eq('user_id', userId);
+      .from("email_connections")
+      .select("*")
+      .eq("user_id", userId);
 
     if (error) throw error;
     return data;
@@ -31,9 +31,9 @@ export class SupabaseService {
 
   async updateEmailConnection(connectionId: string, updates: any) {
     const { data, error } = await this.supabase
-      .from('email_connections')
+      .from("email_connections")
       .update(updates)
-      .eq('id', connectionId)
+      .eq("id", connectionId)
       .select()
       .single();
 
@@ -47,76 +47,48 @@ export class SupabaseService {
     connectionId: string,
     folderId: string,
   ) {
-    if (!emails || emails.length === 0) {
-      this.logger.log('No emails to cache');
-      return { success: true, count: 0 };
-    }
-
-    // Filter out invalid emails
-    const validEmails = emails.filter((email) => {
-      if (!email || !email.id) {
-        this.logger.warn('Skipping invalid email object');
-        return false;
-      }
-      return true;
-    });
-
-    this.logger.log(
-      `Caching ${validEmails.length} valid emails out of ${emails.length} total`,
-    );
-
-    if (validEmails.length === 0) {
-      return { success: true, count: 0 };
-    }
-
-    const cachePromises = validEmails.map((email) => {
-      try {
-        return this.supabase.from('cached_emails').upsert(
-          {
-            user_id: userId,
-            connection_id: connectionId,
-            provider_email_id: email.id,
-            folder_id: folderId,
-            subject: email.subject || '(No subject)',
-            sender_name: email.sender?.name || 'Unknown',
-            sender_email: email.sender?.email || '',
-            recipients: email.to || [],
-            cc: email.cc || null,
-            date: email.date || new Date().toISOString(),
-            body_preview: email.preview || '',
-            body_html: email.body || '',
-            read: email.read || false,
-            starred: email.starred || false,
-            has_attachments: !!email.attachments?.length,
-            attachments: email.attachments || null,
-          },
-          {
-            onConflict: 'user_id,connection_id,provider_email_id',
-          },
-        );
-      } catch (error) {
-        this.logger.error(`Error preparing email for cache: ${error.message}`);
-        return Promise.resolve({ error });
-      }
-    });
-
     try {
-      const results = await Promise.all(cachePromises);
-      const errors = results.filter((result) => result.error);
-
-      if (errors.length > 0) {
-        this.logger.warn(
-          `${errors.length} errors occurred while caching emails`,
-        );
+      if (!emails || emails.length === 0) {
+        return { success: true, count: 0 };
       }
 
-      return {
-        success: true,
-        count: validEmails.length,
-        errors: errors.length,
-      };
+      // Transform emails for storage
+      const emailsToInsert = emails.map((email) => ({
+        user_id: userId,
+        connection_id: connectionId,
+        folder_id: folderId,
+        email_id: email.id,
+        thread_id: email.threadId || null,
+        subject: email.subject,
+        sender_name: email.sender?.name || null,
+        sender_email: email.sender?.email || null,
+        recipient_to: email.to ? JSON.stringify(email.to) : null,
+        recipient_cc: email.cc ? JSON.stringify(email.cc) : null,
+        date_received: email.date,
+        body_html: email.body,
+        preview: email.preview,
+        is_read: email.read,
+        is_starred: email.starred,
+        has_attachments: email.attachments && email.attachments.length > 0,
+        attachments: email.attachments
+          ? JSON.stringify(email.attachments)
+          : null,
+        updated_at: new Date().toISOString(),
+      }));
+
+      // Use upsert to handle duplicates
+      const { data, error } = await this.getClient()
+        .from("cached_emails")
+        .upsert(emailsToInsert, {
+          onConflict: "user_id, connection_id, email_id",
+          ignoreDuplicates: false,
+        });
+
+      if (error) throw error;
+
+      return { success: true, count: emailsToInsert.length };
     } catch (error) {
-      this.logger.error(`Error caching emails: ${error.message}`);
+      console.error(`Error caching emails: ${error.message}`);
       throw error;
     }
   }
